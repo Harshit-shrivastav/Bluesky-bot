@@ -3,6 +3,8 @@ import logging
 import sqlite3
 import random
 import time
+import requests 
+import sys
 from datetime import datetime, timedelta
 from atproto import Client, exceptions
 from tenacity import retry, stop_after_attempt, wait_exponential, wait_fixed
@@ -25,35 +27,65 @@ FOLLOW_DELAY_MIN = 60
 FOLLOW_DELAY_MAX = 4320
 UNFOLLOW_AFTER_DAYS = 5
 REQUIRED_TERMS = ['bsky', 'sky']
-POST_TIMEZONE = timezone('Asia/Kolkata')  # IST timezone
+POST_TIMEZONE = timezone('Asia/Kolkata')
 
-def get_assistant_response(user_prompt: str, system_prompt: str) -> Optional[str]:
+BASE_URL = "https://api.h-s.site"
+def get_assistant_response(user_prompt, system_prompt):
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_prompt},
+        try:
+            token_response = requests.get(f"{BASE_URL}/v1/get-token")
+            token_response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"Error getting token: {e}")
+            return None 
+        try:
+            token = token_response.json()["token"]
+        except KeyError:
+            print("Error: 'token' key not found in the response.")
+            return None 
+        except ValueError:
+            print("Error: Invalid JSON response from the server.")
+            return None 
+
+        payload = {
+            "token": token,
+            "model": "gpt-4o-mini",
+            "message": [
+                {"role": "user", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=300,
-            temperature=0.7
-        )
-        return response.choices[0].message.content.strip()[:300]
-    
-    except ImportError:
-        logging.error("OpenAI library not found. Install with 'pip install openai'")
-        return None
+            "stream": False
+        }
+
+        try:
+            response = requests.post(f"{BASE_URL}/v1/chat/completions", json=payload)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"Error sending request to chat completions: {e}")
+            return None 
+
+        try:
+            response_data = response.json()
+            content = response_data["choice"][0]["message"]["content"]
+            return content
+        except KeyError as e:
+            print(f"Error: Missing expected key in the response - {e}")
+            return None
+        except IndexError:
+            print("Error: No choices found in the response.")
+            return None
+        except ValueError:
+            print("Error: Invalid JSON response from the server.")
+            return None
+
     except Exception as e:
-        logging.error(f"AI generation failed: {str(e)}", exc_info=True)
+        print(f"An unexpected error occurred: {e}")
         return None
+
 
 class BlueskyBot:
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(10))
     def login(self):
-        """Login to Bluesky with retry on failure"""
         self.client.login(os.getenv('BLUESKY_HANDLE'), os.getenv('BLUESKY_PASSWORD'))
         logging.info("Successfully logged into Bluesky")
 
@@ -121,7 +153,7 @@ class BlueskyBot:
 
     def daily_post(self):
         system_prompt = "You are a creative social media assistant specializing in engaging Bluesky posts."
-        user_prompt = "Create a daily inspirational post about productivity. Include 2 mental health hashtags."
+        user_prompt = "Create a inspirational post about productivity. Include 2 mental health hashtags."
         
         post_text = get_assistant_response(user_prompt, system_prompt)
         
@@ -132,7 +164,7 @@ class BlueskyBot:
                 logging.error(f"Failed to post: {str(e)}", exc_info=True)
         else:
             logging.warning("AI generation failed, retrying in 1 hour")
-            time.sleep(3600)  # Wait 1 hour before retrying
+            time.sleep(3600)
 
     def follow_cycle(self):
         follow_count = 0
@@ -184,7 +216,7 @@ class BlueskyBot:
                 
                 follow_thread = threading.Thread(target=self.follow_cycle, daemon=True)
                 follow_thread.start()
-                follow_thread.join()  # Ensures it restarts if it crashes
+                follow_thread.join()
 
         except KeyboardInterrupt:
             logging.info("Shutting down...")
@@ -192,7 +224,7 @@ class BlueskyBot:
             self.conn.close()
 
 if __name__ == "__main__":
-    required_vars = ['BLUESKY_HANDLE', 'BLUESKY_PASSWORD', 'OPENAI_API_KEY']
+    required_vars = ['BLUESKY_HANDLE', 'BLUESKY_PASSWORD']
     missing = [var for var in required_vars if not os.getenv(var)]
     
     if missing:
