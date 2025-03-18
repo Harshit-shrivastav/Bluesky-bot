@@ -12,6 +12,7 @@ from pytz import timezone
 from typing import Optional
 from dotenv import load_dotenv
 import threading
+from collections import deque
 
 load_dotenv()
 
@@ -74,29 +75,40 @@ UNFOLLOW_AFTER_DAYS = 5
 REQUIRED_TERMS = ['bsky', 'sky']
 POST_TIMEZONE = timezone('Asia/Kolkata')
 
+
 BASE_URL = "https://api.h-s.site"
-def get_assistant_response(user_prompt, system_prompt):
+
+conversation_history = deque(maxlen=20)
+
+def get_assistant_response(system_prompt, user_prompt, record_history=True):
     try:
+        # If recording history is enabled, add the current user prompt to the history
+        if record_history:
+            conversation_history.append({"role": "user", "content": user_prompt})
+
         try:
             token_response = requests.get(f"{BASE_URL}/v1/get-token")
             token_response.raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"Error getting token: {e}")
-            return None 
+            sys.exit(1)
+
         try:
             token = token_response.json()["token"]
         except KeyError:
             print("Error: 'token' key not found in the response.")
-            return None 
+            sys.exit(1)
         except ValueError:
             print("Error: Invalid JSON response from the server.")
-            return None 
+            sys.exit(1)
 
+        # Prepare the payload with the system prompt, user prompt, and conversation history
         payload = {
             "token": token,
             "model": "gpt-4o-mini",
             "message": [
                 {"role": "user", "content": system_prompt},
+                *([*conversation_history] if record_history else []),
                 {"role": "user", "content": user_prompt}
             ],
             "stream": False
@@ -107,11 +119,14 @@ def get_assistant_response(user_prompt, system_prompt):
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"Error sending request to chat completions: {e}")
-            return None 
+            return None
 
         try:
             response_data = response.json()
             content = response_data["choice"][0]["message"]["content"]
+            # If recording history is enabled, add the assistant's response to the history
+            if record_history:
+                conversation_history.append({"role": "assistant", "content": content})
             return content
         except KeyError as e:
             print(f"Error: Missing expected key in the response - {e}")
